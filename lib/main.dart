@@ -25,7 +25,7 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
   Location _location = Location();
   double _speed = 0.0;
   bool _isSending = false;
-  String _serverUrl = ''; // Server URL entered by the user
+  String _serverUrl = 'http://localhost:6969/message';
   final TextEditingController _urlController = TextEditingController();
 
   @override
@@ -63,7 +63,7 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
       });
 
       if (_serverUrl.isNotEmpty) {
-        _sendSpeedToServer(_speed);
+        _sendSpeedToServer(_speed * 3.6); // Convert m/s to km/h
       }
     });
   }
@@ -76,13 +76,15 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
 
     try {
       final url = Uri.parse(_serverUrl);
-      final response = await http.post(
-        url,
-        body: {'speed': speed.toString()},
-      );
+
+      // Construct the multipart request
+      final request = http.MultipartRequest('POST', url)
+        ..fields['message'] = '${speed.toStringAsFixed(2)} KMpH';
+
+      final response = await request.send();
 
       if (response.statusCode == 200) {
-        print('Speed sent successfully: $speed');
+        print('Speed sent successfully');
       } else {
         print('Failed to send speed: ${response.statusCode}');
       }
@@ -112,7 +114,7 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
               controller: _urlController,
               decoration: InputDecoration(
                 labelText: 'Server URL',
-                hintText: 'Enter the server URL',
+                hintText: 'http://localhost:6969/message',
                 border: OutlineInputBorder(),
               ),
               onChanged: (value) {
