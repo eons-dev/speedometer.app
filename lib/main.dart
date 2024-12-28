@@ -1,44 +1,69 @@
-import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:location/location.dart';
 import 'package:http/http.dart' as http;
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:workmanager/workmanager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  initializeForegroundService();
-  runApp(ProviderScope(child: SpeedometerApp()));
-}
 
-void initializeForegroundService() {
-  FlutterForegroundTask.init(
-    androidNotificationOptions: AndroidNotificationOptions(
-      channelId: 'speedometer_service',
-      channelName: 'Speedometer Service',
-      channelImportance: NotificationChannelImportance.MIN,
-      iconData: null,
-    ),
-    iosNotificationOptions: const IOSNotificationOptions(
-      showNotification: false,
-      playSound: false,
-    ),
-    foregroundTaskOptions: const ForegroundTaskOptions(
-      isOnceEvent: false,
-    ),
+  // Initialize WorkManager
+  Workmanager().initialize(
+    callbackDispatcher,
+    isInDebugMode: true, // Set to false in production
   );
+
+  runApp(SpeedometerApp());
 }
 
-// Provider to manage and display the current speed
-final speedProvider = StateNotifierProvider<SpeedNotifier, double>((ref) => SpeedNotifier());
+// Callback for WorkManager tasks
+@pragma('vm:entry-point')
+void callbackDispatcher() {
+  Workmanager().executeTask((task, inputData) async {
+    print('[DEBUG] WorkManager task triggered: $task');
 
-class SpeedNotifier extends StateNotifier<double> {
-  SpeedNotifier() : super(0.0);
+    // Get location data
+    final location = Location();
+    bool serviceEnabled = await location.serviceEnabled();
+    if (!serviceEnabled) {
+      serviceEnabled = await location.requestService();
+    }
+    PermissionStatus permissionGranted = await location.hasPermission();
+    if (permissionGranted == PermissionStatus.denied) {
+      permissionGranted = await location.requestPermission();
+    }
 
-  void updateSpeed(double newSpeed) {
-    state = newSpeed;
-  }
+    if (permissionGranted == PermissionStatus.granted) {
+      final locationData = await location.getLocation();
+      double speed = locationData.speed ?? 0.0; // Speed in m/s
+      double speedKmh = speed * 3.6; // Convert m/s to km/h
+      print('[DEBUG] Current speed: $speedKmh km/h');
+
+      // Get server URL from SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      final serverUrl = prefs.getString('serverUrl') ?? 'http://localhost:6969/message';
+
+      // Send speed to server
+      try {
+        final url = Uri.parse(serverUrl);
+        final request = http.MultipartRequest('POST', url)
+          ..fields['message'] = '${speedKmh.toStringAsFixed(2)} KMpH';
+
+        final response = await request.send();
+        if (response.statusCode == 200) {
+          print('[DEBUG] Speed successfully sent to server');
+        } else {
+          print('[DEBUG] Failed to send speed: ${response.statusCode}');
+        }
+      } catch (e) {
+        print('[DEBUG] Error sending speed: $e');
+      }
+    } else {
+      print('[DEBUG] Location permission denied.');
+    }
+
+    return Future.value(true);
+  });
 }
 
 class SpeedometerApp extends StatelessWidget {
@@ -58,33 +83,33 @@ class SpeedometerScreen extends StatefulWidget {
 
 class _SpeedometerScreenState extends State<SpeedometerScreen> {
   final TextEditingController _urlController = TextEditingController(text: 'http://localhost:6969/message');
-  bool _isServiceRunning = false;
+  bool _isTaskScheduled = false;
 
-  Future<void> _startForegroundService() async {
+  Future<void> _startWorkManagerTask() async {
+    print('[DEBUG] Scheduling WorkManager task');
+
     // Save the server URL to SharedPreferences
     SharedPreferences prefs = await SharedPreferences.getInstance();
     await prefs.setString('serverUrl', _urlController.text.trim());
 
-    // Start the foreground service
-    if (await FlutterForegroundTask.isRunningService) {
-      FlutterForegroundTask.restartService();
-    } else {
-      FlutterForegroundTask.startService(
-        notificationTitle: 'Speedometer Running',
-        notificationText: 'Tracking your speed...',
-        callback: _startForegroundCallback,
-      );
-    }
+    // Register a periodic task
+    Workmanager().registerPeriodicTask(
+      "speedTrackingTask",
+      "speedTracking",
+      frequency: const Duration(minutes: 15), // Adjust the frequency as needed
+    );
 
     setState(() {
-      _isServiceRunning = true;
+      _isTaskScheduled = true;
     });
   }
 
-  void _stopForegroundService() {
-    FlutterForegroundTask.stopService();
+  Future<void> _stopWorkManagerTask() async {
+    print('[DEBUG] Cancelling WorkManager task');
+    Workmanager().cancelByUniqueName("speedTrackingTask");
+
     setState(() {
-      _isServiceRunning = false;
+      _isTaskScheduled = false;
     });
   }
 
@@ -110,89 +135,19 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 ElevatedButton(
-                  onPressed: _isServiceRunning ? null : _startForegroundService,
-                  child: Text('Start Service'),
+                  onPressed: _isTaskScheduled ? null : _startWorkManagerTask,
+                  child: Text('Start Background Task'),
                 ),
                 SizedBox(width: 20),
                 ElevatedButton(
-                  onPressed: _isServiceRunning ? _stopForegroundService : null,
-                  child: Text('Stop Service'),
+                  onPressed: _isTaskScheduled ? _stopWorkManagerTask : null,
+                  child: Text('Stop Background Task'),
                 ),
               ],
-            ),
-            SizedBox(height: 40),
-            // Display the current speed
-            Consumer(
-              builder: (context, ref, child) {
-                final speed = ref.watch(speedProvider);
-                return Text(
-                  '${speed.toStringAsFixed(2)} km/h',
-                  style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold),
-                );
-              },
             ),
           ],
         ),
       ),
     );
-  }
-}
-
-@pragma('vm:entry-point')
-void _startForegroundCallback() {
-  FlutterForegroundTask.setTaskHandler(SpeedometerTaskHandler());
-}
-
-class SpeedometerTaskHandler extends TaskHandler {
-  late Location _location;
-  String? _serverUrl;
-  SendPort? _sendPort;
-
-  @override
-  Future<void> onStart(DateTime timestamp, SendPort? sendPort) async {
-    _sendPort = sendPort;
-
-    final prefs = await SharedPreferences.getInstance();
-    _serverUrl = prefs.getString('serverUrl') ?? 'http://localhost:6969/message';
-
-    _location = Location();
-    bool serviceEnabled = await _location.serviceEnabled();
-    if (!serviceEnabled) {
-      serviceEnabled = await _location.requestService();
-    }
-    PermissionStatus permissionGranted = await _location.hasPermission();
-    if (permissionGranted == PermissionStatus.denied) {
-      permissionGranted = await _location.requestPermission();
-    }
-
-    print('Speedometer foreground service started.');
-  }
-
-  @override
-  Future<void> onRepeatEvent(DateTime timestamp, SendPort? sendPort) async {
-    LocationData? locationData = await _location.getLocation();
-    double speed = locationData.speed ?? 0.0; // Speed in m/s
-    double speedKmh = speed * 3.6; // Convert m/s to km/h
-
-    // Update the UI with the current speed
-    sendPort?.send(speedKmh);
-
-    try {
-      final url = Uri.parse(_serverUrl!);
-      final request = http.MultipartRequest('POST', url)
-        ..fields['message'] = '${speedKmh.toStringAsFixed(2)} KMpH';
-
-      final response = await request.send();
-      if (response.statusCode != 200) {
-        print('Failed to send speed: ${response.statusCode}');
-      }
-    } catch (e) {
-      print('Error sending speed: $e');
-    }
-  }
-
-  @override
-  Future<void> onDestroy(DateTime timestamp, SendPort? sendPort) async {
-    print('Speedometer foreground service stopped.');
   }
 }
