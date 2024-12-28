@@ -1,9 +1,74 @@
 import 'package:flutter/material.dart';
 import 'package:location/location.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_background_service_android/flutter_background_service_android.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  initializeService();
   runApp(SpeedometerApp());
+}
+
+void initializeService() async {
+  final service = FlutterBackgroundService();
+
+  await service.configure(
+    androidConfiguration: AndroidConfiguration(
+      onStart: onStart,
+      autoStart: false,
+      isForegroundMode: true,
+      notificationChannelId: 'speedometer_service',
+      initialNotificationTitle: 'Speedometer Service',
+      initialNotificationContent: 'Monitoring speed in the background',
+    ),
+    iosConfiguration: IosConfiguration(
+      autoStart: false,
+      onForeground: onStart,
+    ),
+  );
+}
+
+void onStart(ServiceInstance service) async {
+  // Listen for stop service command
+  service.on('stopService').listen((event) {
+    service.stopSelf();
+  });
+
+  // Retrieve the server URL from SharedPreferences
+  SharedPreferences prefs = await SharedPreferences.getInstance();
+  String? serverUrl = prefs.getString('serverUrl') ?? 'http://localhost:6969/message';
+
+  // Initialize location tracking
+  Location location = Location();
+  bool serviceEnabled = await location.serviceEnabled();
+  if (!serviceEnabled) {
+    serviceEnabled = await location.requestService();
+  }
+  PermissionStatus permissionGranted = await location.hasPermission();
+  if (permissionGranted == PermissionStatus.denied) {
+    permissionGranted = await location.requestPermission();
+  }
+
+  // Listen for location changes
+  location.onLocationChanged.listen((LocationData currentLocation) async {
+    double speed = currentLocation.speed ?? 0.0; // Speed in m/s
+    double speedKmh = speed * 3.6; // Convert m/s to km/h
+
+    try {
+      final url = Uri.parse(serverUrl);
+      final request = http.MultipartRequest('POST', url)
+        ..fields['message'] = '${speedKmh.toStringAsFixed(2)} KMpH';
+
+      final response = await request.send();
+      if (response.statusCode != 200) {
+        print('Failed to send speed: ${response.statusCode}');
+      }
+    } catch (e) {
+      print('Error sending speed: $e');
+    }
+  });
 }
 
 class SpeedometerApp extends StatelessWidget {
@@ -22,78 +87,28 @@ class SpeedometerScreen extends StatefulWidget {
 }
 
 class _SpeedometerScreenState extends State<SpeedometerScreen> {
-  Location _location = Location();
-  double _speed = 0.0;
-  bool _isSending = false;
-  String _serverUrl = 'http://localhost:6969/message';
-  final TextEditingController _urlController = TextEditingController();
+  final TextEditingController _urlController = TextEditingController(text: 'http://localhost:6969/message');
+  bool _isServiceRunning = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _checkPermissionsAndStartUpdates();
-  }
+  void _startService() async {
+    // Save the server URL to SharedPreferences
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    await prefs.setString('serverUrl', _urlController.text.trim());
 
-  Future<void> _checkPermissionsAndStartUpdates() async {
-    bool _serviceEnabled;
-    PermissionStatus _permissionGranted;
+    // Start the background service
+    final service = FlutterBackgroundService();
+    await service.startService();
 
-    // Check if location service is enabled
-    _serviceEnabled = await _location.serviceEnabled();
-    if (!_serviceEnabled) {
-      _serviceEnabled = await _location.requestService();
-      if (!_serviceEnabled) {
-        return;
-      }
-    }
-
-    // Check for location permissions
-    _permissionGranted = await _location.hasPermission();
-    if (_permissionGranted == PermissionStatus.denied) {
-      _permissionGranted = await _location.requestPermission();
-      if (_permissionGranted != PermissionStatus.granted) {
-        return;
-      }
-    }
-
-    // Start listening to location updates
-    _location.onLocationChanged.listen((LocationData currentLocation) {
-      setState(() {
-        _speed = currentLocation.speed ?? 0.0; // Speed in m/s
-      });
-
-      if (_serverUrl.isNotEmpty) {
-        _sendSpeedToServer(_speed * 3.6); // Convert m/s to km/h
-      }
+    setState(() {
+      _isServiceRunning = true;
     });
   }
 
-  Future<void> _sendSpeedToServer(double speed) async {
-    if (_isSending) return; // Prevent multiple requests in parallel
+  void _stopService() async {
+    final service = FlutterBackgroundService();
+    await service.invoke('stopService');
     setState(() {
-      _isSending = true;
-    });
-
-    try {
-      final url = Uri.parse(_serverUrl);
-
-      // Construct the multipart request
-      final request = http.MultipartRequest('POST', url)
-        ..fields['message'] = '${speed.toStringAsFixed(2)} KMpH';
-
-      final response = await request.send();
-
-      if (response.statusCode == 200) {
-        print('Speed sent successfully');
-      } else {
-        print('Failed to send speed: ${response.statusCode}');
-      }
-    } catch (e) {
-      print('Error sending speed: $e');
-    }
-
-    setState(() {
-      _isSending = false;
+      _isServiceRunning = false;
     });
   }
 
@@ -117,33 +132,24 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
                 hintText: 'http://localhost:6969/message',
                 border: OutlineInputBorder(),
               ),
-              onChanged: (value) {
-                setState(() {
-                  _serverUrl = value.trim();
-                });
-              },
             ),
             SizedBox(height: 20),
 
-            // Display current speed
-            Text(
-              'Current Speed:',
-              style: TextStyle(fontSize: 24),
+            // Start/Stop Service Buttons
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                ElevatedButton(
+                  onPressed: _isServiceRunning ? null : _startService,
+                  child: Text('Start Service'),
+                ),
+                SizedBox(width: 20),
+                ElevatedButton(
+                  onPressed: _isServiceRunning ? _stopService : null,
+                  child: Text('Stop Service'),
+                ),
+              ],
             ),
-            Text(
-              '${(_speed * 3.6).toStringAsFixed(2)} km/h', // Convert m/s to km/h
-              style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold),
-            ),
-            SizedBox(height: 20),
-
-            // Show sending status
-            if (_isSending)
-              CircularProgressIndicator()
-            else
-              Text(
-                'Ready to send speed to the server',
-                style: TextStyle(fontSize: 16, color: Colors.grey),
-              ),
           ],
         ),
       ),
