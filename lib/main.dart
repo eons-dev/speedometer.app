@@ -24,40 +24,39 @@ void callbackDispatcher() {
 
     final location = Location();
 
-    // Check if location services are enabled
-    bool serviceEnabled = await location.serviceEnabled();
-    if (!serviceEnabled) {
-      print('[DEBUG] Location service is not enabled. Requesting...');
-      serviceEnabled = await location.requestService();
-      if (!serviceEnabled) {
-        print('[ERROR] Location service is still disabled.');
-        return Future.value(false); // Exit if service is disabled
-      }
-    }
-
-    // Check location permissions
-    PermissionStatus permissionGranted = await location.hasPermission();
-    if (permissionGranted == PermissionStatus.denied) {
-      print('[DEBUG] Location permission not granted. Requesting...');
-      permissionGranted = await location.requestPermission();
-      if (permissionGranted != PermissionStatus.granted) {
-        print('[ERROR] Location permission denied.');
-        return Future.value(false); // Exit if permission is denied
-      }
-    }
-
-    // Get location data
+    // Start location service with error handling
     try {
+      bool serviceEnabled = await location.serviceEnabled();
+      if (!serviceEnabled) {
+        print('[DEBUG] Location service is not enabled. Requesting...');
+        serviceEnabled = await location.requestService();
+        if (!serviceEnabled) {
+          print('[ERROR] Location service is still disabled.');
+          return Future.value(false);
+        }
+      }
+
+      PermissionStatus permissionGranted = await location.hasPermission();
+      if (permissionGranted == PermissionStatus.denied) {
+        print('[DEBUG] Location permission not granted. Requesting...');
+        permissionGranted = await location.requestPermission();
+        if (permissionGranted != PermissionStatus.granted) {
+          print('[ERROR] Location permission denied.');
+          return Future.value(false);
+        }
+      }
+
+      print('[DEBUG] Accessing location...');
       final locationData = await location.getLocation();
-      double speed = locationData.speed ?? 0.0; // Speed in m/s
-      double speedKmh = speed * 3.6; // Convert m/s to km/h
+      double speed = locationData.speed ?? 0.0;
+      double speedKmh = speed * 3.6;
       print('[DEBUG] Current speed: $speedKmh km/h');
 
-      // Send speed to the server
+      // Get server URL and send data
       final prefs = await SharedPreferences.getInstance();
       final serverUrl = prefs.getString('serverUrl') ?? 'http://localhost:6969/message';
-      final url = Uri.parse(serverUrl);
 
+      final url = Uri.parse(serverUrl);
       final request = http.MultipartRequest('POST', url)
         ..fields['message'] = '${speedKmh.toStringAsFixed(2)} KMpH';
 
@@ -68,13 +67,14 @@ void callbackDispatcher() {
         print('[DEBUG] Failed to send speed: ${response.statusCode}');
       }
     } catch (e) {
-      print('[ERROR] Error retrieving location or sending data: $e');
-      return Future.value(false); // Exit if an error occurs
+      print('[ERROR] Error during location access or data send: $e');
+      return Future.value(false);
     }
 
-    return Future.value(true); // Task completed successfully
+    return Future.value(true);
   });
 }
+
 
 class SpeedometerApp extends StatelessWidget {
   @override
