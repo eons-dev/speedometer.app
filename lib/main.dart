@@ -1,74 +1,32 @@
+import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:location/location.dart';
 import 'package:http/http.dart' as http;
-import 'package:flutter_background_service/flutter_background_service.dart';
-import 'package:flutter_background_service_android/flutter_background_service_android.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  initializeService();
+  initializeForegroundService();
   runApp(SpeedometerApp());
 }
 
-void initializeService() async {
-  final service = FlutterBackgroundService();
-
-  await service.configure(
-    androidConfiguration: AndroidConfiguration(
-      onStart: onStart,
-      autoStart: false,
-      isForegroundMode: true,
-      notificationChannelId: 'speedometer_service',
-      initialNotificationTitle: 'Speedometer Service',
-      initialNotificationContent: 'Monitoring speed in the background',
+void initializeForegroundService() {
+  FlutterForegroundTask.init(
+    androidNotificationOptions: AndroidNotificationOptions(
+      channelId: 'speedometer_service',
+      channelName: 'Speedometer Service',
+      channelImportance: NotificationChannelImportance.MIN,
+      iconData: null,
     ),
-    iosConfiguration: IosConfiguration(
-      autoStart: false,
-      onForeground: onStart,
+    iosNotificationOptions: const IOSNotificationOptions(
+      showNotification: false,
+      playSound: false,
+    ),
+    foregroundTaskOptions: const ForegroundTaskOptions(
+      isOnceEvent: false,
     ),
   );
-}
-
-void onStart(ServiceInstance service) async {
-  // Listen for stop service command
-  service.on('stopService').listen((event) {
-    service.stopSelf();
-  });
-
-  // Retrieve the server URL from SharedPreferences
-  SharedPreferences prefs = await SharedPreferences.getInstance();
-  String? serverUrl = prefs.getString('serverUrl') ?? 'http://localhost:6969/message';
-
-  // Initialize location tracking
-  Location location = Location();
-  bool serviceEnabled = await location.serviceEnabled();
-  if (!serviceEnabled) {
-    serviceEnabled = await location.requestService();
-  }
-  PermissionStatus permissionGranted = await location.hasPermission();
-  if (permissionGranted == PermissionStatus.denied) {
-    permissionGranted = await location.requestPermission();
-  }
-
-  // Listen for location changes
-  location.onLocationChanged.listen((LocationData currentLocation) async {
-    double speed = currentLocation.speed ?? 0.0; // Speed in m/s
-    double speedKmh = speed * 3.6; // Convert m/s to km/h
-
-    try {
-      final url = Uri.parse(serverUrl);
-      final request = http.MultipartRequest('POST', url)
-        ..fields['message'] = '${speedKmh.toStringAsFixed(2)} KMpH';
-
-      final response = await request.send();
-      if (response.statusCode != 200) {
-        print('Failed to send speed: ${response.statusCode}');
-      }
-    } catch (e) {
-      print('Error sending speed: $e');
-    }
-  });
 }
 
 class SpeedometerApp extends StatelessWidget {
@@ -90,23 +48,29 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
   final TextEditingController _urlController = TextEditingController(text: 'http://localhost:6969/message');
   bool _isServiceRunning = false;
 
-  void _startService() async {
+  Future<void> _startForegroundService() async {
     // Save the server URL to SharedPreferences
     SharedPreferences prefs = await SharedPreferences.getInstance();
     await prefs.setString('serverUrl', _urlController.text.trim());
 
-    // Start the background service
-    final service = FlutterBackgroundService();
-    await service.startService();
+    // Start the foreground service
+    if (await FlutterForegroundTask.isRunningService) {
+      FlutterForegroundTask.restartService();
+    } else {
+      FlutterForegroundTask.startService(
+        notificationTitle: 'Speedometer Running',
+        notificationText: 'Tracking your speed...',
+        callback: _startForegroundCallback,
+      );
+    }
 
     setState(() {
       _isServiceRunning = true;
     });
   }
 
-  void _stopService() async {
-    final service = FlutterBackgroundService();
-    await service.invoke('stopService');
+  void _stopForegroundService() {
+    FlutterForegroundTask.stopService();
     setState(() {
       _isServiceRunning = false;
     });
@@ -121,31 +85,25 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.start,
-          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            // Input field for server URL
             TextField(
               controller: _urlController,
               decoration: InputDecoration(
                 labelText: 'Server URL',
-                hintText: 'http://localhost:6969/message',
                 border: OutlineInputBorder(),
               ),
             ),
             SizedBox(height: 20),
-
-            // Start/Stop Service Buttons
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 ElevatedButton(
-                  onPressed: _isServiceRunning ? null : _startService,
+                  onPressed: _isServiceRunning ? null : _startForegroundService,
                   child: Text('Start Service'),
                 ),
                 SizedBox(width: 20),
                 ElevatedButton(
-                  onPressed: _isServiceRunning ? _stopService : null,
+                  onPressed: _isServiceRunning ? _stopForegroundService : null,
                   child: Text('Stop Service'),
                 ),
               ],
@@ -154,5 +112,58 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
         ),
       ),
     );
+  }
+}
+
+@pragma('vm:entry-point')
+void _startForegroundCallback() {
+  FlutterForegroundTask.setTaskHandler(SpeedometerTaskHandler());
+}
+
+class SpeedometerTaskHandler extends TaskHandler {
+  late Location _location;
+  String? _serverUrl;
+
+  @override
+  Future<void> onStart(DateTime timestamp, SendPort? sendPort) async {
+    final prefs = await SharedPreferences.getInstance();
+    _serverUrl = prefs.getString('serverUrl') ?? 'http://localhost:6969/message';
+
+    _location = Location();
+    bool serviceEnabled = await _location.serviceEnabled();
+    if (!serviceEnabled) {
+      serviceEnabled = await _location.requestService();
+    }
+    PermissionStatus permissionGranted = await _location.hasPermission();
+    if (permissionGranted == PermissionStatus.denied) {
+      permissionGranted = await _location.requestPermission();
+    }
+
+    print('Speedometer foreground service started.');
+  }
+
+  @override
+  Future<void> onRepeatEvent(DateTime timestamp, SendPort? sendPort) async {
+    LocationData? locationData = await _location.getLocation();
+    double speed = locationData.speed ?? 0.0; // Speed in m/s
+    double speedKmh = speed * 3.6; // Convert m/s to km/h
+
+    try {
+      final url = Uri.parse(_serverUrl!);
+      final request = http.MultipartRequest('POST', url)
+        ..fields['message'] = '${speedKmh.toStringAsFixed(2)} KMpH';
+
+      final response = await request.send();
+      if (response.statusCode != 200) {
+        print('Failed to send speed: ${response.statusCode}');
+      }
+    } catch (e) {
+      print('Error sending speed: $e');
+    }
+  }
+
+  @override
+  Future<void> onDestroy(DateTime timestamp, SendPort? sendPort) async {
+    print('Speedometer foreground service stopped.');
   }
 }
