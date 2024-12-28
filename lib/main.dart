@@ -4,11 +4,12 @@ import 'package:location/location.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   initializeForegroundService();
-  runApp(SpeedometerApp());
+  runApp(ProviderScope(child: SpeedometerApp()));
 }
 
 void initializeForegroundService() {
@@ -27,6 +28,17 @@ void initializeForegroundService() {
       isOnceEvent: false,
     ),
   );
+}
+
+// Provider to manage and display the current speed
+final speedProvider = StateNotifierProvider<SpeedNotifier, double>((ref) => SpeedNotifier());
+
+class SpeedNotifier extends StateNotifier<double> {
+  SpeedNotifier() : super(0.0);
+
+  void updateSpeed(double newSpeed) {
+    state = newSpeed;
+  }
 }
 
 class SpeedometerApp extends StatelessWidget {
@@ -108,6 +120,17 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
                 ),
               ],
             ),
+            SizedBox(height: 40),
+            // Display the current speed
+            Consumer(
+              builder: (context, ref, child) {
+                final speed = ref.watch(speedProvider);
+                return Text(
+                  '${speed.toStringAsFixed(2)} km/h',
+                  style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold),
+                );
+              },
+            ),
           ],
         ),
       ),
@@ -123,9 +146,12 @@ void _startForegroundCallback() {
 class SpeedometerTaskHandler extends TaskHandler {
   late Location _location;
   String? _serverUrl;
+  SendPort? _sendPort;
 
   @override
   Future<void> onStart(DateTime timestamp, SendPort? sendPort) async {
+    _sendPort = sendPort;
+
     final prefs = await SharedPreferences.getInstance();
     _serverUrl = prefs.getString('serverUrl') ?? 'http://localhost:6969/message';
 
@@ -147,6 +173,9 @@ class SpeedometerTaskHandler extends TaskHandler {
     LocationData? locationData = await _location.getLocation();
     double speed = locationData.speed ?? 0.0; // Speed in m/s
     double speedKmh = speed * 3.6; // Convert m/s to km/h
+
+    // Update the UI with the current speed
+    sendPort?.send(speedKmh);
 
     try {
       final url = Uri.parse(_serverUrl!);
