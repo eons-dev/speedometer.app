@@ -22,47 +22,57 @@ void callbackDispatcher() {
   Workmanager().executeTask((task, inputData) async {
     print('[DEBUG] WorkManager task triggered: $task');
 
-    // Get location data
     final location = Location();
+
+    // Check if location services are enabled
     bool serviceEnabled = await location.serviceEnabled();
     if (!serviceEnabled) {
+      print('[DEBUG] Location service is not enabled. Requesting...');
       serviceEnabled = await location.requestService();
-    }
-    PermissionStatus permissionGranted = await location.hasPermission();
-    if (permissionGranted == PermissionStatus.denied) {
-      permissionGranted = await location.requestPermission();
+      if (!serviceEnabled) {
+        print('[ERROR] Location service is still disabled.');
+        return Future.value(false); // Exit if service is disabled
+      }
     }
 
-    if (permissionGranted == PermissionStatus.granted) {
+    // Check location permissions
+    PermissionStatus permissionGranted = await location.hasPermission();
+    if (permissionGranted == PermissionStatus.denied) {
+      print('[DEBUG] Location permission not granted. Requesting...');
+      permissionGranted = await location.requestPermission();
+      if (permissionGranted != PermissionStatus.granted) {
+        print('[ERROR] Location permission denied.');
+        return Future.value(false); // Exit if permission is denied
+      }
+    }
+
+    // Get location data
+    try {
       final locationData = await location.getLocation();
       double speed = locationData.speed ?? 0.0; // Speed in m/s
       double speedKmh = speed * 3.6; // Convert m/s to km/h
       print('[DEBUG] Current speed: $speedKmh km/h');
 
-      // Get server URL from SharedPreferences
+      // Send speed to the server
       final prefs = await SharedPreferences.getInstance();
       final serverUrl = prefs.getString('serverUrl') ?? 'http://localhost:6969/message';
+      final url = Uri.parse(serverUrl);
 
-      // Send speed to server
-      try {
-        final url = Uri.parse(serverUrl);
-        final request = http.MultipartRequest('POST', url)
-          ..fields['message'] = '${speedKmh.toStringAsFixed(2)} KMpH';
+      final request = http.MultipartRequest('POST', url)
+        ..fields['message'] = '${speedKmh.toStringAsFixed(2)} KMpH';
 
-        final response = await request.send();
-        if (response.statusCode == 200) {
-          print('[DEBUG] Speed successfully sent to server');
-        } else {
-          print('[DEBUG] Failed to send speed: ${response.statusCode}');
-        }
-      } catch (e) {
-        print('[DEBUG] Error sending speed: $e');
+      final response = await request.send();
+      if (response.statusCode == 200) {
+        print('[DEBUG] Speed successfully sent to server');
+      } else {
+        print('[DEBUG] Failed to send speed: ${response.statusCode}');
       }
-    } else {
-      print('[DEBUG] Location permission denied.');
+    } catch (e) {
+      print('[ERROR] Error retrieving location or sending data: $e');
+      return Future.value(false); // Exit if an error occurs
     }
 
-    return Future.value(true);
+    return Future.value(true); // Task completed successfully
   });
 }
 
@@ -87,6 +97,28 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
 
   Future<void> _startWorkManagerTask() async {
     print('[DEBUG] Scheduling WorkManager task');
+
+    // Check and request permissions
+    final location = Location();
+    bool serviceEnabled = await location.serviceEnabled();
+    if (!serviceEnabled) {
+      print('[DEBUG] Location service not enabled. Requesting...');
+      serviceEnabled = await location.requestService();
+      if (!serviceEnabled) {
+        print('[ERROR] Location service still disabled.');
+        return;
+      }
+    }
+
+    PermissionStatus permissionGranted = await location.hasPermission();
+    if (permissionGranted == PermissionStatus.denied) {
+      print('[DEBUG] Location permission not granted. Requesting...');
+      permissionGranted = await location.requestPermission();
+      if (permissionGranted != PermissionStatus.granted) {
+        print('[ERROR] Location permission denied.');
+        return;
+      }
+    }
 
     // Save the server URL to SharedPreferences
     SharedPreferences prefs = await SharedPreferences.getInstance();
